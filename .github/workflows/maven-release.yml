@@ -1,0 +1,74 @@
+name: Build and Release Maven Plugin
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java JDK Version'
+        required: false
+        default: '25'
+        type: string
+      java-distribution:
+        description: 'JDK Distribution'
+        required: false
+        default: 'corretto'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ inputs.java-distribution }}
+          java-version: ${{ inputs.java-version }}
+          cache: 'maven'
+
+      - name: Build with Maven
+        run: mvn -B clean package --file pom.xml
+
+      - name: Extract Maven Metadata
+        id: meta
+        run: |
+          ARTIFACT_ID=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "artifact_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Locate Target JAR
+        id: jar_file
+        run: |
+          # Findet die Haupt-JAR und ignoriert Original-JARs (z. B. bei maven-shade-plugin)
+          JAR_PATH=$(find target/ -maxdepth 1 -name "${{ steps.meta.outputs.artifact_id }}-*.jar" ! -name "original-*.jar" | head -n 1)
+          echo "path=$JAR_PATH" >> $GITHUB_OUTPUT
+
+      - name: Upload Plugin JAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ steps.meta.outputs.artifact_id }}-${{ steps.meta.outputs.version }}"
+          path: ${{ steps.jar_file.outputs.path }}
+          if-no-files-found: error
+
+      - name: Create or Update GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.meta.outputs.version }}"
+          name: "${{ steps.meta.outputs.artifact_id }} v${{ steps.meta.outputs.version }}"
+          body: "Automatischer Release Build für ${{ steps.meta.outputs.artifact_id }} v${{ steps.meta.outputs.version }} (Commit ${{ github.sha }})."
+          files: ${{ steps.jar_file.outputs.path }}
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.version, '-SNAPSHOT') }}
+          generate_release_notes: true
+          make_latest: ${{ !contains(steps.meta.outputs.version, '-SNAPSHOT') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
